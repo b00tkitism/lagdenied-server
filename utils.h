@@ -3,7 +3,7 @@
 //
 #pragma once
 
-#define LOG(format, ...) fprintf(stderr, "[%s] " format, __VA_ARGS__)
+#define LOG(format, name, ...) fprintf(stderr, "[%s_%d] " format, name, worker_number, ##__VA_ARGS__)
 
 // Caller MUST free the result
 char* to_hex_string(const char* data, size_t len);

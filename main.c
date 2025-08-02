@@ -1,6 +1,7 @@
 //
 // Created by mahdi on 7/28/25.
 //
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 #include <uv.h>
@@ -14,10 +15,13 @@
 
 #define LISTEN_ADDRESS "0.0.0.0"
 #define LISTEN_PORT    9390
+#define PROCESS_COUNT 20
+// #define _DEBUG 0
 
 Buffer* pool = NULL;
 uv_loop_t *loop = NULL;
 uv_udp_t *udp_server = NULL;
+int worker_number = -1;
 
 typedef struct {
     conn_id_t key;
@@ -292,16 +296,44 @@ void signal_handler(uv_signal_t *handle, int signum) {
     uv_stop(loop);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     printf(BANNER, VERSION, RELEASE_DATE, AUTHOR);
+    if (argc < 2) {
+        LOG("usage: %s [worker-count]\n", "main", argv[0]);
+        return 1;
+    }
+
+    int flags = 0;
+    int worker_count = 0;
+    worker_count = strtol(argv[1], NULL, 10);
+
+    if (worker_count > 1) {
+        for (int i = 0; i < worker_count - 1; i++) {
+            pid_t pid = fork();
+            if (pid == 0) {
+                worker_number = i + 1;
+                LOG("Application started\n", "worker");
+                break;  // Prevent child from creating more processes
+            } else if (pid > 0) {
+            } else {
+                perror("fork");
+                exit(EXIT_FAILURE);
+            }
+            i++;
+        };
+        flags = UV_UDP_REUSEPORT;
+    }
+
+    if (worker_number == -1) {
+        worker_number = 0;
+        LOG("Application started\n", "worker");
+    }
 
     loop = uv_default_loop();
     int uv_error = 0;
 
     pool = init_pool(NULL);
     uv_signal_t sig;
-
-    LOG("Application started\n", "main");
 
     struct sockaddr_in listen_address;
     uv_error = uv_ip4_addr(LISTEN_ADDRESS, LISTEN_PORT, &listen_address);
@@ -323,7 +355,7 @@ int main(void) {
         goto cleanup;
     }
 
-    uv_error = uv_udp_bind(udp_server, (const struct sockaddr *) &listen_address, 0);
+    uv_error = uv_udp_bind(udp_server, (const struct sockaddr *) &listen_address, flags);
     if (uv_error < 0) {
         LOG("error: binding on udp handle: %s\n", "main", uv_strerror(uv_error));
         goto cleanup;
