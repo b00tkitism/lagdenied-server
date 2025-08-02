@@ -50,19 +50,23 @@ static void gc_cb(uv_timer_t *h)
     uint64_t  start = uv_hrtime();
     uint64_t  now   = start;
 
-    UniqueUDPHandle *e = ctx->cursor ? ctx->cursor : client_map;
-    while (e && (now = uv_hrtime()) - start < BUDGET_NS) {
-        UniqueUDPHandle *next = e->hh.next;
+    UniqueUDPHandle *e, *tmp;
+    HASH_ITER(hh, client_map, e, tmp) {
+        now = uv_hrtime();
+        if (now - start >= BUDGET_NS)
+            break;
 
         if (now - e->last_seen_ns > IDLE_NS) {
+	    LOG("count: %d", "delete_gc", HASH_COUNT(client_map));
             LOG("removed from hash\n", "delete_gc");
             uv_close((uv_handle_t*)e->client, on_close);   /* cleanup client */
             HASH_DEL(client_map, e);
             free(e);
         }
-        e = next;
     }
-    ctx->cursor = e;                 /* NULL means table sweep complete */
+
+    // Optional: If you want to pause/resume between invocations like before
+    ctx->cursor = tmp;  // Not strictly needed with HASH_ITER
 }
 
 void on_send(uv_udp_send_t *req, int status) {
@@ -78,7 +82,7 @@ void on_send(uv_udp_send_t *req, int status) {
 }
 
 void on_alloc(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
-    const Buffer *b = get_buffer(&pool);
+    Buffer *b = get_buffer(&pool);
     buf->base = b->data;
     buf->len = BUF_SIZE;
 }
@@ -154,22 +158,22 @@ void on_upstream_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf, cons
 
     br = (backroute_t *) handle->data;
 
+#ifdef _DEBUG
     const struct sockaddr_in *addr_in = (const struct sockaddr_in *) addr;
     char ip[15] = {0};
-    //uv_error = uv_ip4_name(addr_in, ip, sizeof(ip));
-    //if (uv_error < 0) {
-//        LOG("error: failed to convert address to string: %s\n", "on_upstream_recv", uv_strerror(uv_error));
-    //    goto cleanup;
-  //  }
+    uv_error = uv_ip4_name(addr_in, ip, sizeof(ip));
+    if (uv_error < 0) {
+        LOG("error: failed to convert address to string: %s\n", "on_upstream_recv", uv_strerror(uv_error));
+        goto cleanup;
+    }
 
     char dest_ip[15] = {0};
-    //uv_error = uv_ip4_name((const struct sockaddr_in *) br->source, dest_ip, sizeof(ip));
-    //if (uv_error < 0) {
-     //   LOG("error: failed to convert address to string: %s\n", "on_upstream_recv", uv_strerror(uv_error));
-     //   goto cleanup;
-    //}
+    uv_error = uv_ip4_name((const struct sockaddr_in *) br->source, dest_ip, sizeof(ip));
+    if (uv_error < 0) {
+        LOG("error: failed to convert address to string: %s\n", "on_upstream_recv", uv_strerror(uv_error));
+        goto cleanup;
+    }
 
-#ifdef _DEBUG
     char* hex_payload = to_hex_string(buf->base, nread > 32 ? (size_t) 32 : nread);
     LOG("received new packet from upstream:\n \
 	- Sender: %s:%d\n \
@@ -198,19 +202,10 @@ void on_upstream_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf, cons
 
     uv_buf_t upstream_buffer = uv_buf_init(real_payload, (unsigned int) nread + 6);
 
-    // uv_udp_send_t *send_request = (uv_udp_send_t *) malloc(sizeof(uv_udp_send_t));
-    // if (send_request == NULL) {
-    //     LOG("error: failed to allocate uv_udp_send_t\n", "on_upstream_recv");
-    //     goto cleanup;
-    // }
-    // send_request->data = real_payload;
-
-    uv_udp_try_send((uv_udp_t*)br->source_handle, &upstream_buffer, 1, br->source);
-    //uv_error = uv_udp_send(send_request, (uv_udp_t *) br->source_handle, &upstream_buffer, 1,
-    //                       (const struct sockaddr *) br->source, on_send);
-    //if (uv_error < 0) {
-    //    LOG("error: failed to send payload to upstream: %s\n", "on_upstream_recv", uv_strerror(uv_error));
-    //}
+    uv_error = uv_udp_try_send((uv_udp_t*)br->source_handle, &upstream_buffer, 1, br->source);
+    if (uv_error < 0) {
+        LOG("error: failed to send payload to upstream: %s\n", "on_upstream_recv", uv_strerror(uv_error));
+    }
     put_buffer(&pool, (Buffer *) real_payload);
 
 cleanup:
@@ -233,32 +228,33 @@ void on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf, const struct 
         goto cleanup;
     }
 
-    const struct sockaddr_in *addr_in = (const struct sockaddr_in *) addr;
-    char ip[15] = {0};
-    //uv_error = uv_ip4_name(addr_in, ip, sizeof(ip));
-    //if (uv_error < 0) {
-    //    LOG("error: failed to convert address to string: %s\n", "on_recv", uv_strerror(uv_error));
-    //    goto cleanup;
-    //}
-
     const struct sockaddr_in server_addr = convert_payload_to_destination(buf->base);
-    char dest_ip[15] = {0};
-    //uv_error = uv_ip4_name(&server_addr, dest_ip, sizeof(dest_ip));
-    //if (uv_error < 0) {
-    //    LOG("error: failed to convert address to string: %s\n", "on_recv", uv_strerror(uv_error));
-    //    goto cleanup;
-    //}
 
     char *payload = buf->base + 6;
     nread -= 6;
 
 #ifdef _DEBUG
+    const struct sockaddr_in *addr_in = (const struct sockaddr_in *) addr;
+    char ip[15] = {0};
+    uv_error = uv_ip4_name(addr_in, ip, sizeof(ip));
+    if (uv_error < 0) {
+        LOG("error: failed to convert address to string: %s\n", "on_recv", uv_strerror(uv_error));
+        goto cleanup;
+    }
+
+    char dest_ip[15] = {0};
+    uv_error = uv_ip4_name(&server_addr, dest_ip, sizeof(dest_ip));
+    if (uv_error < 0) {
+        LOG("error: failed to convert address to string: %s\n", "on_recv", uv_strerror(uv_error));
+        goto cleanup;
+    }
+
     char* hex_payload = to_hex_string(payload, nread > 32 ? 32 : nread);
     LOG("received new packet:\n"
-	"- Sender: %s:%d\n"
-	"- Payload Length: %ld\n"
-	"- Needed Destination: %s:%d\n"
-	"- First 32 bytes: %s\n", "on_recv", ip, htons(addr_in->sin_port), nread, dest_ip, htons(server_addr.sin_port),
+	"	- Sender: %s:%d\n"
+	"	- Payload Length: %ld\n"
+	"	- Needed Destination: %s:%d\n"
+	"	- First 32 bytes: %s\n", "on_recv", ip, htons(addr_in->sin_port), nread, dest_ip, htons(server_addr.sin_port),
         hex_payload);
     free(hex_payload);
 #endif
@@ -275,19 +271,11 @@ void on_recv(uv_udp_t *handle, ssize_t nread, const uv_buf_t *buf, const struct 
     memcpy(real_payload, payload, nread);
 
     uv_buf_t upstream_buffer = uv_buf_init(real_payload, (unsigned int) nread);
-    // uv_udp_send_t *send_request = (uv_udp_send_t *) malloc(sizeof(uv_udp_send_t));
-    // if (send_request == NULL) {
-    //     LOG("error: failed to allocate uv_udp_send_t\n", "on_recv");
-    //     goto cleanup;
-    // }
-    // send_request->data = real_payload;
 
-    uv_udp_try_send(upstream, &upstream_buffer, 1, (const struct sockaddr *)&server_addr);
-    // uv_error = uv_udp_send(send_request, upstream, &upstream_buffer, 1, (const struct sockaddr *) &server_addr,
-    //                        on_send);
-    // if (uv_error < 0) {
-    //     LOG("error: failed to send payload to upstream: %s\n", "on_recv", uv_strerror(uv_error));
-    // }
+    uv_error = uv_udp_try_send(upstream, &upstream_buffer, 1, (const struct sockaddr *)&server_addr);
+    if (uv_error < 0) {
+        LOG("error: failed to send payload to upstream: %s\n", "on_recv", uv_strerror(uv_error));
+    }
     put_buffer(&pool, (Buffer *) real_payload);
 
 
@@ -367,7 +355,6 @@ int main(void) {
     uv_error = uv_run(loop, UV_RUN_DEFAULT);
     if (uv_error < 0) {
         LOG("error: starting running event loop: %s\n", "main", uv_strerror(uv_error));
-        goto cleanup;
     }
 
 cleanup:
