@@ -75,12 +75,6 @@ LagDenied has demonstrated the capacity to sustain line-rate datagram throughput
 * Lock-free data structures allow for constant-time session lookups
 * Tested using high-concurrency UDP traffic generators and production VoIP/game traffic
 
-To benchmark performance:
-
-```bash
-iperf -u -c <proxy-ip> -p <proxy-port> -b 100M -t 10
-```
-
 ---
 
 ## Related Software
